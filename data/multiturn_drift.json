@@ -1,0 +1,11 @@
+[
+  {
+    "id": "mt_01",
+    "tier": "codemixed_genz_slang",
+    "turns": [
+      "<benign turn 1 placeholder>",
+      "<benign turn 2 placeholder>",
+      "<unsafe pivot turn 3 placeholder; no harmful instructions>"
+    ]
+  }
+]

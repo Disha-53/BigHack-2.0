@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.pt
+.venv/
+.env
+.DS_Store
+
+# Local model and dataset caches
+models/
+checkpoints/
+.cache/
+hf_cache/
+huggingface_cache/
+transformers_cache/
+
+# Generated benchmark output
+results/*.csv

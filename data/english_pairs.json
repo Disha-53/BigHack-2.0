@@ -1,0 +1,12 @@
+[
+  {
+    "id": "en_01",
+    "harmful": "<placeholder harmful-intent prompt for research evaluation>",
+    "harmless": "<placeholder benign prompt>"
+  },
+  {
+    "id": "en_02",
+    "harmful": "<placeholder harmful-intent prompt for research evaluation>",
+    "harmless": "<placeholder benign prompt>"
+  }
+]
