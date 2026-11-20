@@ -797,7 +797,7 @@ def _multi_turn_chart() -> tuple[go.Figure, bool]:
             status_col = _find_column(frame, "status")
             if status_col:
                 status = measured_rows[status_col].astype(str).str.casefold()
-                measured_rows = measured_rows.loc[~status.isin({"not_implemented", "pending", "placeholder"})]
+                measured_rows = measured_rows.loc[~status.isin({"not_implemented", "pending", "placeholder", "illustrative_demo"})]
             jsr_numeric = pd.to_numeric(measured_rows[jsr_col], errors="coerce")
             cosine_numeric = pd.to_numeric(measured_rows[cosine_col], errors="coerce")
             valid = jsr_numeric.notna() & cosine_numeric.notna()
@@ -879,7 +879,7 @@ def _alpha_tradeoff_chart(alpha: float) -> tuple[go.Figure, bool]:
             status_col = _find_column(frame, "status")
             if status_col:
                 status = measured_rows[status_col].astype(str).str.casefold()
-                measured_rows = measured_rows.loc[~status.isin({"not_implemented", "pending", "placeholder"})]
+                measured_rows = measured_rows.loc[~status.isin({"not_implemented", "pending", "placeholder", "illustrative_demo"})]
             alpha_values = pd.to_numeric(measured_rows[alpha_col], errors="coerce")
             jsr_values = pd.to_numeric(measured_rows[jsr_col], errors="coerce")
             over_values = pd.to_numeric(measured_rows[over_col], errors="coerce")
@@ -979,7 +979,9 @@ def _tier_metric_frames() -> tuple[pd.DataFrame, dict[str, bool]]:
     refusal_col = _find_column(frame, "refusal_rate", "refusal_rate_pct")
     fertility_col = _find_column(frame, "mean_token_fertility", "token_fertility", "fertility")
     jsr_col = _find_column(frame, "jsr", "jsr_pct", "jailbreak_success_rate")
-    cosine_col = _find_column(frame, "refusal_vector_cosine", "cosine_similarity", "mean_cosine_similarity", "cosine")
+    vanilla_jsr_col = _find_column(frame, "vanilla_jsr", "vanilla_jsr_pct")
+    shield_jsr_col = _find_column(frame, "indicshield_jsr", "indicshield_jsr_pct", "shield_jsr")
+    cosine_col = _find_column(frame, "refusal_vector_cosine", "cosine_similarity", "mean_cosine_similarity", "mean_cosine_sim", "cosine")
     over_col = _find_column(frame, "over_refusal_rate", "over_refusal", "over_refusal_pct")
     if dataset_col is None:
         st.caption("metrics.csv has no tier/dataset column; using illustrative tier values.")
@@ -1004,7 +1006,7 @@ def _tier_metric_frames() -> tuple[pd.DataFrame, dict[str, bool]]:
             continue
         if status_col:
             status = group[status_col].astype(str).str.casefold()
-            group = group.loc[~status.isin({"not_implemented", "pending", "placeholder"})]
+            group = group.loc[~status.isin({"not_implemented", "pending", "placeholder", "illustrative_demo"})]
         if group.empty:
             continue
 
@@ -1042,6 +1044,17 @@ def _tier_metric_frames() -> tuple[pd.DataFrame, dict[str, bool]]:
                     mean_value = float(value.mean())
                     percent = mean_value * 100 if abs(mean_value) <= 1 else mean_value
                     result.loc[index, column] = 100 - percent if refusal_col and not jsr_col else percent
+                    series_tiers[series_name].add(tier_label)
+        for column, series_name in (
+            (vanilla_jsr_col, "vanilla_jsr"),
+            (shield_jsr_col, "shield_jsr"),
+        ):
+            if column:
+                value = pd.to_numeric(group[column], errors="coerce").dropna()
+                if not value.empty:
+                    result.loc[index, "Vanilla JSR" if series_name == "vanilla_jsr" else "Shield JSR"] = sum(
+                        _percent_values(value)
+                    ) / len(value)
                     series_tiers[series_name].add(tier_label)
 
     required_tiers = {label for label, _ in tiers}
