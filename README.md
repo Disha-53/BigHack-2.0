@@ -20,10 +20,13 @@ The starter benchmark records are safe placeholders. Replace them only with revi
 
 ```powershell
 python -m src.run_benchmark
+python -m src.extract_vector
 streamlit run app.py
 ```
 
 The benchmark CLI writes a `results/metrics.csv` scaffold with `not_implemented` status until inference and metric collection are connected.
+The extraction CLI reads harmful/harmless prompt pairs from `data/english_pairs.json` and saves normalized layer-wise vectors, AUROC scores, and the best layer to `results/refusal_vec.pt`. Override the model, data, output, or probed layers with `--model_name`, `--data_path`, `--output_path`, and `--layers`. The starter prompt pairs are placeholders, so replace them with reviewed research examples before interpreting extraction results.
+`src.indicshield_hook.IndicShieldHook` attaches to the selected decoder layer with `with hook.attach(model):` and conditionally steers prefill activations when their last-token cosine similarity exceeds `tau`. Its `get_stats()` method reports the latest gate decision and measured hook-call latency; latency depends on the model, device, and prompt.
 
 ## Team ownership
 
