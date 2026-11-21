@@ -218,7 +218,7 @@ def _run_live(prompt: str, tau: float, alpha: float, is_harmful: bool) -> dict[s
         "vanilla_refused": vanilla_refused,
         "indicshield_refused": shield_refused,
         "cosine_similarity": probe.values[0] if probe.values else None,
-        "latency_ms": sum(hook.latencies_ms) if hook.latencies_ms else None,
+        "latency_ms": hook.last_latency_ms,
         "triggered": hook_stats["triggered"],
     }
 

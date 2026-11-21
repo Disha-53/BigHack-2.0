@@ -43,7 +43,6 @@ class IndicShieldHook:
         self.last_similarity = 0.0
         self.triggered = False
         self.last_latency_ms = 0.0
-        self.latencies_ms: list[float] = []
         self.handle: RemovableHandle | None = None
         self._cached_vec: torch.Tensor | None = None
         self._triggered_mask: torch.Tensor | None = None
@@ -53,7 +52,6 @@ class IndicShieldHook:
         self.last_similarity = 0.0
         self.triggered = False
         self.last_latency_ms = 0.0
-        self.latencies_ms.clear()
         self._triggered_mask = None
 
     def _get_vec(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -100,7 +98,7 @@ class IndicShieldHook:
                     dim=-1,
                 )
                 self.last_similarity = float(similarities.max().item())
-                self._triggered_mask = similarities >= self.tau
+                self._triggered_mask = similarities > self.tau
                 self.triggered = bool(self._triggered_mask.any().item())
             elif self._triggered_mask is None or self._triggered_mask.numel() != batch_size:
                 self._triggered_mask = torch.zeros(
@@ -123,7 +121,6 @@ class IndicShieldHook:
             return hidden_states
         finally:
             self.last_latency_ms = (time.perf_counter() - started) * 1000.0
-            self.latencies_ms.append(self.last_latency_ms)
 
     @contextmanager
     def attach(self, model: nn.Module) -> Generator["IndicShieldHook", None, None]:

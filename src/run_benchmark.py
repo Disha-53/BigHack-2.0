@@ -245,13 +245,11 @@ def _run_benchmark(
 
         similarity_start = len(monitor.values)
         with hook.attach(model):
-            latency_start = len(hook.latencies_ms)
             shield_response = generate_response(model, tokenizer, messages, max_new_tokens)
-            latencies = hook.latencies_ms[latency_start:]
         shield_refused = is_refusal(shield_response)
         similarities = monitor.values[similarity_start:]
         similarity = _mean_or_nan(similarities)
-        latency = _mean_or_nan(latencies)
+        latency = hook.last_latency_ms
 
         vanilla_refusals.append(vanilla_refused)
         shield_refusals.append(shield_refused)
