@@ -12,7 +12,7 @@
 
 1. **Extract** — Estimate normalized refusal directions from harmful/harmless prompt-pair activations across layers 12–24.
 2. **Probe** — Measure last-token activation similarity to the refusal direction at the selected layer.
-3. **Gate & Steer** — Compare cosine similarity with `tau`; when the threshold is exceeded, add `alpha * refusal_vector` to the residual stream.
+3. **Gate & Steer** — Compare cosine similarity with `tau`; when similarity meets or exceeds the threshold, add `alpha * refusal_vector` to the residual stream.
 
 The local, git-ignored `results/refusal_vec.pt` checkpoint identifies `Qwen/Qwen2.5-3B-Instruct`, selects layer 19, and records AUROC `1.0000` for that layer. The checkpoint also reports `1.0000` for layers 20–24. This is the checkpoint's stored extraction result, not an independently reproduced result or evidence of cross-dataset generalization; the raw activations and split manifest are not present in the repository.
 
@@ -35,7 +35,9 @@ python results/generate_charts.py
 streamlit run app.py
 ```
 
-The current `src/extract_vector.py` entry point is not wired to a prompt-group extraction workflow and will report `NotImplementedError`; its reusable activation/vector helpers are available, but this command does not currently regenerate the checkpoint. The benchmark command requires a compatible checkpoint and locally available model weights (or access to download them).
+`src/extract_vector.py` reads paired harmful/harmless prompts from `data/english_pairs.json`, probes layers 12–24, computes per-layer refusal directions and AUROC, and saves the vectors and selected layer to `results/refusal_vec.pt`. Optional `--model_name`, `--data_path`, `--output_path`, and `--layers` arguments override its defaults. The benchmark command requires a compatible checkpoint and locally available model weights (or access to download them).
+
+The Streamlit threshold slider defaults to `0.18` and recalculates its live per-prompt gate status and calibration curve from `results/eval_logs.csv`; the benchmark CLI's independent `--tau` default remains `0.65`.
 
 `results/generate_charts.py` reads `metrics.csv`, `alpha_sweep.csv`, and `multiturn_drift.csv`; it fails with a diagnostic if required inputs are absent or empty. To inspect layout without benchmark results, run:
 
@@ -45,7 +47,7 @@ python results/generate_charts.py --demo
 
 Demo data are watermarked **ILLUSTRATIVE PREVIEW — NOT FINAL OR MEASURED** and are never substituted silently. Charts are exported at 300 DPI to `results/chart1_fertility.png`, `results/chart2_benchmark.png`, and `results/chart3_failure.png`. CSV charts are labeled as local inputs whose provenance has not been independently verified.
 
-The Streamlit inspector starts in safe preview mode if the local refusal vector, hook, cached model weights, or CUDA GPU is unavailable. Preview mode does not produce model responses or invented metric values. In live mode, unreviewed prompts are treated as harmful and every response not detected as a refusal is displayed only as `[REDACTED - UNSAFE RESPONSE]`.
+The Streamlit inspector also renders interactive Altair calibration, tier, fertility, multi-turn, and alpha charts from the local result CSVs; changing its `tau` slider updates the gate badge and threshold metrics without running inference. It starts in safe preview mode if the local refusal vector, hook, cached model weights, or CUDA GPU is unavailable. Preview mode does not produce model responses or invented metric values. In live mode, unreviewed prompts are treated as harmful and every response not detected as a refusal is displayed only as `[REDACTED - UNSAFE RESPONSE]`.
 
 ## Current result snapshot and limitations
 

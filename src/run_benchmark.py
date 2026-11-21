@@ -244,11 +244,12 @@ def _run_benchmark(
         vanilla_refused = is_refusal(vanilla_response)
 
         similarity_start = len(monitor.values)
-        latency_start = len(hook.latencies_ms)
-        shield_response = generate_response(model, tokenizer, messages, max_new_tokens)
+        with hook.attach(model):
+            latency_start = len(hook.latencies_ms)
+            shield_response = generate_response(model, tokenizer, messages, max_new_tokens)
+            latencies = hook.latencies_ms[latency_start:]
         shield_refused = is_refusal(shield_response)
         similarities = monitor.values[similarity_start:]
-        latencies = hook.latencies_ms[latency_start:]
         similarity = _mean_or_nan(similarities)
         latency = _mean_or_nan(latencies)
 
@@ -288,17 +289,17 @@ def _run_alpha_sweep(
     rows: list[dict[str, Any]] = []
     for alpha in ALPHA_SWEEP:
         hook.alpha = alpha
-        refusals = [
-            is_refusal(
-                generate_response(
-                    model,
-                    tokenizer,
-                    [{"role": "user", "content": record["prompt"]}],
-                    max_new_tokens,
-                )
+        responses = [
+            _generate_with_hook(
+                model,
+                tokenizer,
+                hook,
+                [{"role": "user", "content": record["prompt"]}],
+                max_new_tokens,
             )
             for record in records
         ]
+        refusals = [is_refusal(response) for response in responses]
         jsr, over_refusal = _rate_summary(records, refusals)
         rows.append(
             {
@@ -310,9 +311,22 @@ def _run_alpha_sweep(
     return rows
 
 
+def _generate_with_hook(
+    model: Any,
+    tokenizer: Any,
+    hook: IndicShieldHook,
+    messages: Sequence[dict[str, str]],
+    max_new_tokens: int,
+) -> str:
+    """Generate one response while the intervention hook is attached."""
+    with hook.attach(model):
+        return generate_response(model, tokenizer, messages, max_new_tokens)
+
+
 def _run_multiturn(
     model: Any,
     tokenizer: Any,
+    hook: IndicShieldHook,
     monitor: CosineMonitor,
     conversations: list[dict[str, Any]],
     max_new_tokens: int,
@@ -332,7 +346,9 @@ def _run_multiturn(
             messages.append({"role": "user", "content": turns[2]})
 
             similarity_start = len(monitor.values)
-            response = generate_response(model, tokenizer, messages, max_new_tokens)
+            response = _generate_with_hook(
+                model, tokenizer, hook, messages, max_new_tokens
+            )
             refusals.append(is_refusal(response))
             similarities.extend(monitor.values[similarity_start:])
 
@@ -377,7 +393,6 @@ def main() -> None:
     monitor = CosineMonitor(refusal_vec)
     monitor_handle = layer.register_forward_hook(monitor)
     hook = IndicShieldHook(refusal_vec, best_layer, args.tau, args.alpha)
-    hook.attach(layer)
     try:
         logs, vanilla_refusals, shield_refusals = _run_benchmark(
             model, tokenizer, hook, monitor, records, args.max_new_tokens
@@ -387,10 +402,9 @@ def main() -> None:
         )
         hook.alpha = args.alpha
         multiturn_rows = _run_multiturn(
-            model, tokenizer, monitor, conversations, args.max_new_tokens
+            model, tokenizer, hook, monitor, conversations, args.max_new_tokens
         )
     finally:
-        hook.remove()
         monitor_handle.remove()
 
     metric_rows: list[dict[str, Any]] = []

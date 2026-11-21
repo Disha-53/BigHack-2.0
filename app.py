@@ -203,11 +203,10 @@ def _run_live(prompt: str, tau: float, alpha: float, is_harmful: bool) -> dict[s
     probe = _CosineProbe(refusal_vec)
     probe_handle = layer.register_forward_hook(probe)
     hook = IndicShieldHook(refusal_vec, best_layer, tau=tau, alpha=alpha)
-    hook.attach(layer)
     try:
-        shield_response = _generate(model, tokenizer, messages, max_new_tokens=64)
+        with hook.attach(model):
+            shield_response = _generate(model, tokenizer, messages, max_new_tokens=64)
     finally:
-        hook.remove()
         probe_handle.remove()
 
     vanilla_refused = is_refusal(vanilla_response)

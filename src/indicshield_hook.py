@@ -1,111 +1,158 @@
-"""PyTorch activation hook for applying the IndicShield refusal direction."""
+"""PyTorch activation hook for gated IndicShield refusal-direction steering."""
 
-from time import perf_counter
-from typing import Any
+from __future__ import annotations
+
+import time
+from contextlib import contextmanager
+from typing import Any, Generator
 
 import torch
-from torch import nn
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.hooks import RemovableHandle
 
 
 class IndicShieldHook:
-    """Apply a refusal-direction intervention during multi-token prefill calls.
-
-    Attach the hook to the model block whose output is the residual stream at
-    ``layer_idx``. Calls with a sequence length greater than one are treated as
-    prefill; single-token decode calls are left untouched.
-    """
+    """Gate residual-stream steering on cosine similarity during prompt prefill."""
 
     def __init__(
         self,
         refusal_vec: torch.Tensor,
         layer_idx: int,
-        tau: float,
-        alpha: float,
+        tau: float = 0.65,
+        alpha: float = 1.6,
+        steer_all_tokens: bool = True,
     ) -> None:
-        """Initialize hook parameters and per-call latency tracking."""
-        self.refusal_vec = refusal_vec.detach()
+        if refusal_vec.ndim != 1:
+            raise ValueError("refusal_vec must be a one-dimensional tensor.")
+        if not torch.isfinite(refusal_vec).all():
+            raise ValueError("refusal_vec must contain only finite values.")
+        norm = torch.linalg.vector_norm(refusal_vec.float())
+        if norm.item() == 0:
+            raise ValueError("refusal_vec must have non-zero length.")
+        if layer_idx < 0:
+            raise ValueError("layer_idx must be non-negative.")
+        if not -1.0 <= tau <= 1.0:
+            raise ValueError("tau must be between -1 and 1.")
+
+        self.refusal_vec = F.normalize(refusal_vec.detach().float(), dim=-1)
         self.layer_idx = layer_idx
         self.tau = tau
         self.alpha = alpha
+        self.steer_all_tokens = steer_all_tokens
+        self.last_similarity = 0.0
+        self.triggered = False
+        self.last_latency_ms = 0.0
         self.latencies_ms: list[float] = []
-        self._last_stats: dict[str, float | bool | None] = {
-            "similarity": None,
-            "triggered": False,
-            "latency_ms": None,
-        }
-        self._handle: Any | None = None
+        self.handle: RemovableHandle | None = None
+        self._cached_vec: torch.Tensor | None = None
+        self._triggered_mask: torch.Tensor | None = None
 
-    def attach(self, module: nn.Module) -> None:
-        """Register this hook on the selected model block."""
-        if self._handle is not None:
-            raise RuntimeError("The IndicShield hook is already attached.")
-        self._handle = module.register_forward_hook(self._forward_hook)
+    def reset(self) -> None:
+        """Reset telemetry and per-sequence gate state before a new prompt."""
+        self.last_similarity = 0.0
+        self.triggered = False
+        self.last_latency_ms = 0.0
+        self.latencies_ms.clear()
+        self._triggered_mask = None
 
-    def remove(self) -> None:
-        """Remove the registered hook if it is attached."""
-        if self._handle is not None:
-            self._handle.remove()
-            self._handle = None
+    def _get_vec(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if (
+            self._cached_vec is None
+            or self._cached_vec.device != device
+            or self._cached_vec.dtype != dtype
+        ):
+            self._cached_vec = self.refusal_vec.to(device=device, dtype=dtype)
+        return self._cached_vec
 
-    def _forward_hook(
+    def _hook_fn(
         self,
         module: nn.Module,
         inputs: tuple[Any, ...],
         output: Any,
     ) -> Any:
-        """Gate and optionally adjust a prefill residual stream."""
         del module, inputs
-        started = perf_counter()
-        prefill_similarity: float | None = None
-        triggered = False
+        started = time.perf_counter()
         try:
-            activations, rebuild = self._get_activations(output)
-            if activations.ndim != 3 or activations.shape[1] <= 1:
-                return output
+            is_tuple = isinstance(output, tuple)
+            if is_tuple:
+                if not output or not isinstance(output[0], torch.Tensor):
+                    raise TypeError("Hook output tuple must begin with a tensor.")
+                hidden_states = output[0]
+            elif isinstance(output, torch.Tensor):
+                hidden_states = output
+            else:
+                raise TypeError("Hook output must be a tensor or a tuple beginning with a tensor.")
 
-            vector = self.refusal_vec.to(device=activations.device, dtype=activations.dtype)
-            if vector.ndim != 1 or vector.shape[0] != activations.shape[-1]:
-                raise ValueError("refusal_vec must be 1-D and match the residual hidden size.")
+            if hidden_states.ndim != 3:
+                raise ValueError("Hooked hidden states must have shape [batch, sequence, hidden].")
+            if hidden_states.shape[-1] != self.refusal_vec.shape[0]:
+                raise ValueError("refusal_vec must match the residual hidden size.")
+            if hidden_states.shape[1] == 0:
+                raise ValueError("Hooked hidden states must contain at least one token.")
 
-            last_token = activations[:, -1, :]
-            similarities = torch.nn.functional.cosine_similarity(
-                last_token.float(),
-                vector.float().expand_as(last_token),
-                dim=-1,
-            )
-            prefill_similarity = float(similarities[0].detach().cpu())
-            selected = similarities > self.tau
-            triggered = bool(torch.any(selected).item())
-            if not triggered:
-                return output
+            vector = self._get_vec(hidden_states.device, hidden_states.dtype)
+            batch_size = hidden_states.shape[0]
+            if hidden_states.shape[1] > 1:
+                similarities = F.cosine_similarity(
+                    hidden_states[:, -1, :].float(),
+                    vector.float().unsqueeze(0),
+                    dim=-1,
+                )
+                self.last_similarity = float(similarities.max().item())
+                self._triggered_mask = similarities >= self.tau
+                self.triggered = bool(self._triggered_mask.any().item())
+            elif self._triggered_mask is None or self._triggered_mask.numel() != batch_size:
+                self._triggered_mask = torch.zeros(
+                    batch_size, dtype=torch.bool, device=hidden_states.device
+                )
+                self.triggered = False
 
-            adjusted = activations.clone()
-            adjusted[selected] = adjusted[selected] + self.alpha * vector
-            return rebuild(adjusted)
+            if self._triggered_mask is not None and self._triggered_mask.any().item():
+                adjusted = hidden_states.clone()
+                selected = self._triggered_mask.to(hidden_states.device)
+                delta = self.alpha * vector
+                if self.steer_all_tokens and hidden_states.shape[1] > 1:
+                    adjusted[selected] = adjusted[selected] + delta
+                else:
+                    adjusted[selected, -1, :] = adjusted[selected, -1, :] + delta
+                hidden_states = adjusted
+
+            if is_tuple:
+                return (hidden_states,) + output[1:]
+            return hidden_states
         finally:
-            latency_ms = (perf_counter() - started) * 1000
-            self.latencies_ms.append(latency_ms)
-            if prefill_similarity is not None:
-                self._last_stats = {
-                    "similarity": prefill_similarity,
-                    "triggered": triggered,
-                    "latency_ms": latency_ms,
-                }
+            self.last_latency_ms = (time.perf_counter() - started) * 1000.0
+            self.latencies_ms.append(self.last_latency_ms)
 
-    @staticmethod
-    def _get_activations(output: Any) -> tuple[torch.Tensor, Any]:
-        """Find the hidden-state tensor and return a function rebuilding output."""
-        if isinstance(output, torch.Tensor):
-            return output, lambda activations: activations
-        if isinstance(output, tuple) and output and isinstance(output[0], torch.Tensor):
-            return output[0], lambda activations: (activations, *output[1:])
-        raise TypeError("Hook output must be a tensor or a tuple beginning with a tensor.")
+    @contextmanager
+    def attach(self, model: nn.Module) -> Generator["IndicShieldHook", None, None]:
+        """Attach to ``model.model.layers[layer_idx]`` for one generation."""
+        if self.handle is not None:
+            raise RuntimeError("The IndicShield hook is already attached.")
+        try:
+            layers = getattr(getattr(model, "model", None), "layers")
+            target_layer = layers[self.layer_idx]
+        except (AttributeError, IndexError, TypeError) as error:
+            raise ValueError(
+                "Model must expose the requested layer at model.model.layers[layer_idx]."
+            ) from error
 
-    @property
-    def last_latency_ms(self) -> float | None:
-        """Return latency for the most recent hook call, if available."""
-        return self.latencies_ms[-1] if self.latencies_ms else None
+        self.reset()
+        self.handle = target_layer.register_forward_hook(self._hook_fn)
+        try:
+            yield self
+        finally:
+            self.handle.remove()
+            self.handle = None
 
-    def get_stats(self) -> dict[str, float | bool | None]:
-        """Return the most recent eligible prefill gate decision and hook latency."""
-        return self._last_stats.copy()
+    def get_stats(self) -> dict[str, Any]:
+        """Return telemetry for the most recent hook invocation."""
+        return {
+            "similarity": round(self.last_similarity, 4),
+            "triggered": self.triggered,
+            "latency_ms": round(self.last_latency_ms, 4),
+            "layer_idx": self.layer_idx,
+            "tau": self.tau,
+            "alpha": self.alpha,
+        }
