@@ -28,6 +28,11 @@ class IndicShieldHook:
         self.tau = tau
         self.alpha = alpha
         self.latencies_ms: list[float] = []
+        self._last_stats: dict[str, float | bool | None] = {
+            "similarity": None,
+            "triggered": False,
+            "latency_ms": None,
+        }
         self._handle: Any | None = None
 
     def attach(self, module: nn.Module) -> None:
@@ -51,6 +56,8 @@ class IndicShieldHook:
         """Gate and optionally adjust a prefill residual stream."""
         del module, inputs
         started = perf_counter()
+        prefill_similarity: float | None = None
+        triggered = False
         try:
             activations, rebuild = self._get_activations(output)
             if activations.ndim != 3 or activations.shape[1] <= 1:
@@ -66,15 +73,24 @@ class IndicShieldHook:
                 vector.float().expand_as(last_token),
                 dim=-1,
             )
+            prefill_similarity = float(similarities[0].detach().cpu())
             selected = similarities > self.tau
-            if not torch.any(selected):
+            triggered = bool(torch.any(selected).item())
+            if not triggered:
                 return output
 
             adjusted = activations.clone()
             adjusted[selected] = adjusted[selected] + self.alpha * vector
             return rebuild(adjusted)
         finally:
-            self.latencies_ms.append((perf_counter() - started) * 1000)
+            latency_ms = (perf_counter() - started) * 1000
+            self.latencies_ms.append(latency_ms)
+            if prefill_similarity is not None:
+                self._last_stats = {
+                    "similarity": prefill_similarity,
+                    "triggered": triggered,
+                    "latency_ms": latency_ms,
+                }
 
     @staticmethod
     def _get_activations(output: Any) -> tuple[torch.Tensor, Any]:
@@ -89,3 +105,7 @@ class IndicShieldHook:
     def last_latency_ms(self) -> float | None:
         """Return latency for the most recent hook call, if available."""
         return self.latencies_ms[-1] if self.latencies_ms else None
+
+    def get_stats(self) -> dict[str, float | bool | None]:
+        """Return the most recent eligible prefill gate decision and hook latency."""
+        return self._last_stats.copy()
